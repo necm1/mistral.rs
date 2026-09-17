@@ -154,7 +154,10 @@ pub fn qtensor_indexed_moe_forward(
     // Create an UnquantLinear and use its gather_forward
     let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(weights, None)))?;
 
-    unquant.gather_forward(x, ids)
+    let in_dtype = x.dtype();
+    unquant
+        .gather_forward(&x.to_dtype(DType::F32)?, ids)?
+        .to_dtype(in_dtype)
 }
 
 /// Perform indexed MoE forward pass on a QMatMul.
