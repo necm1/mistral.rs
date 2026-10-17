@@ -1108,6 +1108,31 @@ impl FastExpertsWeights {
             }
             return self.forward_gather_lora(forward, config);
         }
+
+        // experts moved to cpu by the topology while activations stay on gpu:
+        // run the gather path on cpu and copy the result back
+        if let Some(qt) = self.fused_gate_proj.get_qtensor() {
+            if qt.device().is_cpu() && !forward.xs.device().is_cpu() {
+                let device = forward.xs.device().clone();
+                let xs_flat = forward.xs_flat.to_device(&Device::Cpu)?;
+                let xs = xs_flat.reshape(forward.xs.shape())?;
+                let topk_ids = forward.topk_ids.to_device(&Device::Cpu)?;
+                let topk_weights = forward.topk_weights.to_device(&Device::Cpu)?;
+                let cpu_forward = MoEForward {
+                    xs: &xs,
+                    xs_flat: &xs_flat,
+                    topk_weights: &topk_weights,
+                    topk_ids: &topk_ids,
+                    original_dtype: forward.original_dtype,
+                    shape: forward.shape,
+                    lora: None,
+                };
+                return self
+                    .forward_gather(&cpu_forward, config)?
+                    .to_device(&device);
+            }
+        }
+
         // while collecting, force the gather path; fused kernels never materialize the routed inputs
         #[cfg(feature = "cuda")]
         if self.fused_gate_proj.stats_snapshot().is_none() {
@@ -1231,6 +1256,7 @@ impl FastExpertsWeights {
 
     fn uses_flattened_gather(&self, device: &Device) -> bool {
         device.is_cuda()
+            || device.is_cpu()
             || [
                 &self.fused_gate_proj,
                 &self.fused_up_proj,
